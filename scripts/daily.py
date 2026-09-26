@@ -35,13 +35,19 @@ def refresh_data() -> None:
 
     print("更新公司行為…", flush=True)
     recent = (pd.Timestamp.today() - pd.DateOffset(months=3)).strftime("%Y-%m-%d")
-    fresh = corporate.build(start=recent, refresh=True)
+    # save=False：只取近三個月，不可覆蓋完整歷史
+    fresh = corporate.build(start=recent, refresh=True, save=False)
     path = CACHE / "corporate_actions.parquet"
-    if path.exists():
+    if path.exists() and len(fresh):
         old = pd.read_parquet(path)
         merged = pd.concat([old, fresh], ignore_index=True)
         merged = merged.drop_duplicates(subset=["stock_id", "date", "kind"])
-        merged.sort_values(["stock_id", "date"]).to_parquet(path, index=False)
+        merged = merged.sort_values(["stock_id", "date"])
+        if len(merged) < len(old):
+            raise RuntimeError(
+                f"合併後事件數減少（{len(old)} → {len(merged)}），已中止寫入以免損壞歷史")
+        merged.to_parquet(path, index=False)
+        print(f"  公司行為 {len(old):,} → {len(merged):,} 筆")
 
 
 def main() -> None:

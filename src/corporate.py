@@ -122,8 +122,13 @@ def _periods(start: str, end: str):
         cur = cur + pd.DateOffset(months=3)
 
 
-def build(start: str = BACKFILL_START, end: str | None = None, refresh: bool = False) -> pd.DataFrame:
-    """回傳欄位 stock_id / date / before / after / factor / kind 的公司行為表。"""
+def build(start: str = BACKFILL_START, end: str | None = None,
+          refresh: bool = False, save: bool = True) -> pd.DataFrame:
+    """回傳欄位 stock_id / date / before / after / factor / kind 的公司行為表。
+
+    save=False 時不寫入快取。抓取部分區間（例如每日排程只取近三個月）時
+    必須如此，否則會把完整歷史覆蓋成片段，導致所有還原股價失真。
+    """
     if EVENTS_PATH.exists() and not refresh:
         return pd.read_parquet(EVENTS_PATH)
 
@@ -164,7 +169,8 @@ def build(start: str = BACKFILL_START, end: str | None = None, refresh: bool = F
     df["factor"] = df["after"] / df["before"]
     # 過濾明顯異常的比值，避免來源資料錯誤污染還原價
     df = df[(df["factor"] > 0.05) & (df["factor"] < 3.0)].reset_index(drop=True)
-    df.to_parquet(EVENTS_PATH, index=False)
+    if save:
+        df.to_parquet(EVENTS_PATH, index=False)
     return df
 
 

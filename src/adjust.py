@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from config import CACHE, RAW
 from src import corporate
@@ -16,6 +18,8 @@ PANEL_PATH = CACHE / "panel.parquet"
 RECENT_PATH = CACHE / "panel_recent.parquet"
 # 指標最長回看 252 日，保留 450 日足以正確計算並留有餘裕
 RECENT_DAYS = 450
+# 完整重建時每批處理的股票檔數，用於控制峰值記憶體
+BUILD_CHUNK = 200
 _PRICE_COLS = {"open": "open", "max": "high", "min": "low", "close": "close",
                "Trading_Volume": "volume", "Trading_money": "amount"}
 
@@ -51,7 +55,21 @@ def load_official(verbose: bool = True) -> pd.DataFrame:
 
     out = out.drop_duplicates(subset=["stock_id", "date"], keep="last")
     out = out[_is_common_stock(out["stock_id"])]
-    return out.sort_values(["stock_id", "date"]).reset_index(drop=True)
+    out = out.sort_values(["stock_id", "date"]).reset_index(drop=True)
+    return _compact(out)
+
+
+def _compact(df: pd.DataFrame) -> pd.DataFrame:
+    """壓縮欄位型別。
+
+    500 萬筆資料中，stock_id 以 Python 字串儲存就佔數百 MB；
+    改為 category 並將價格降為 float32，可讓記憶體用量降到約四分之一。
+    """
+    out = df.copy()
+    for col in ("open", "high", "low", "close", "volume"):
+        if col in out.columns:
+            out[col] = out[col].astype("float32")
+    return out
 
 
 def _is_common_stock(ids: pd.Series) -> pd.Series:
@@ -153,20 +171,40 @@ def build_panel(refresh: bool = False, verbose: bool = True) -> pd.DataFrame:
     raw = raw[(raw["high"] >= raw["low"])]
 
     ev_by_stock = {sid: g for sid, g in events.groupby("stock_id")}
-    frames = []
-    groups = list(raw.groupby("stock_id", sort=False))
-    for i, (sid, grp) in enumerate(groups, 1):
-        frames.append(_apply_factors(grp, ev_by_stock.get(sid, pd.DataFrame())))
-        if verbose and i % 500 == 0:
-            print(f"  還原中 {i}/{len(groups)}", flush=True)
+    cols = ["stock_id", "date", "open", "high", "low", "close", "volume", "adj_factor"]
 
-    panel = pd.concat(frames, ignore_index=True)
-    panel = panel[["stock_id", "date", "open", "high", "low", "close", "volume", "adj_factor"]]
-    panel = panel.sort_values(["stock_id", "date"]).reset_index(drop=True)
-    panel.to_parquet(PANEL_PATH, index=False)
+    # 分批處理並逐批寫入檔案：一次載入全部會讓同一份資料被複製多次，
+    # 峰值記憶體達數 GB，小型主機無法負荷。
+    ids = raw["stock_id"].unique()
+    writer = None
+    total = 0
+    try:
+        for start in range(0, len(ids), BUILD_CHUNK):
+            batch = ids[start:start + BUILD_CHUNK]
+            sub = raw[raw["stock_id"].isin(batch)]
+            frames = [_apply_factors(grp, ev_by_stock.get(sid, pd.DataFrame()))
+                      for sid, grp in sub.groupby("stock_id", sort=False)]
+            if not frames:
+                continue
+            part = pd.concat(frames, ignore_index=True)[cols]
+            part = part.sort_values(["stock_id", "date"], ignore_index=True)
+            table = pa.Table.from_pandas(part, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(PANEL_PATH, table.schema)
+            writer.write_table(table)
+            total += len(part)
+            del frames, part, sub, table
+            if verbose:
+                print(f"  還原中 {min(start + BUILD_CHUNK, len(ids))}/{len(ids)}", flush=True)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    del raw, ev_by_stock
+    panel = pd.read_parquet(PANEL_PATH)
     write_recent(panel)
     if verbose:
-        print(f"還原完成：{panel['stock_id'].nunique()} 檔、{len(panel):,} 筆")
+        print(f"還原完成：{panel['stock_id'].nunique()} 檔、{total:,} 筆")
     return panel
 
 
