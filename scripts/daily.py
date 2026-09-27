@@ -8,6 +8,8 @@
     python scripts/daily.py --no-update        # 只用現有資料
     python scripts/daily.py --catchup 30       # 補跑最近 30 個交易日
     python scripts/daily.py --history          # 顯示已結束的交易紀錄
+
+非交易日（假日、颱風假）執行時不會產生訊號，也不會推播。
 """
 
 from __future__ import annotations
@@ -21,6 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import CACHE, RESULTS
 from src import adjust, corporate, daily_update, journal, notify
+
+# 連續這麼多天沒有新資料就發出警告。
+# 實測近兩年最長連續休市為 12 個日曆日（2026 年農曆年 2/13～2/20 加上前後週末），
+# 因此設為 15 天以留出餘裕，避免長假期間誤報。
+STALE_WARN_DAYS = 15
 
 
 def refresh_data() -> None:
@@ -81,8 +88,20 @@ def main() -> None:
         todo = dates[-1:]          # 首次執行只處理最新交易日
     else:
         todo = dates[dates > last]
-        if len(todo) == 0:
-            todo = dates[-1:]      # 已處理過最新日，重新輸出一次
+
+    if len(todo) == 0:
+        # 沒有新的交易日：假日、颱風假，或盤後報表尚未更新。
+        # 此時不應推播，否則會把前一日的訊號重複送一次。
+        latest = dates[-1]
+        stale = (pd.Timestamp.today().normalize() - latest).days
+        print(f"沒有新的交易日（最新資料為 {latest.date()}），不產生訊號")
+        if stale > STALE_WARN_DAYS and "--push" in args:
+            # 連續多日沒有新資料，多半是資料來源或排程出問題，值得通知
+            from src import telegram_bot
+            telegram_bot.send(
+                f"⚠️ 資料已 {stale} 天未更新\n最新交易日：{latest.date()}\n"
+                "若非連假，請檢查排程與資料來源")
+        return
 
     text = ""
     for d in todo:

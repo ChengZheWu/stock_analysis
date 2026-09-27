@@ -97,3 +97,36 @@ def test_partial_corporate_fetch_does_not_save():
     corporate.build(start=recent, refresh=True, save=False)
 
     assert corporate.EVENTS_PATH.read_bytes() == before, "save=False 仍寫入了快取"
+
+
+def test_stale_threshold_covers_longest_holiday():
+    """資料過期的警告門檻必須大於實際最長連續休市，否則長假期間會誤報。"""
+    from src import adjust
+    from scripts.daily import STALE_WARN_DAYS
+
+    panel = adjust.load_recent()
+    dates = pd.DatetimeIndex(sorted(panel["date"].unique()))
+    longest_gap = pd.Series(dates).diff().dt.days.max()
+
+    assert STALE_WARN_DAYS > longest_gap, (
+        f"門檻 {STALE_WARN_DAYS} 天不足以涵蓋最長休市 {longest_gap:.0f} 天")
+
+
+def test_non_trading_day_produces_no_signal(tmp_path, monkeypatch):
+    """沒有新交易日時不得產生訊號檔，也不應推播。"""
+    import scripts.daily as daily
+    from src import journal as J
+
+    db = tmp_path / "j.db"
+    conn = J.connect(db)
+    d = pd.Timestamp("2026-01-05")
+    J.record_candidates(conn, d, [])
+    assert J.last_processed(conn) == d
+
+    # 模擬「最新交易日就是已處理過的那天」
+    dates = pd.DatetimeIndex([d - pd.Timedelta(days=1), d])
+    todo = dates[dates > J.last_processed(conn)]
+    assert len(todo) == 0, "已處理過最新交易日時不應有待處理日期"
+
+    written = list(tmp_path.glob("signal_*.txt"))
+    assert not written, "非交易日不應產生訊號檔"
