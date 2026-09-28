@@ -50,6 +50,23 @@ TELEGRAM_BOT_TOKEN=你的bot token     # 推播才需要
 TELEGRAM_CHAT_ID=你的chat id         # 推播才需要
 ```
 
+Telegram 推播的設定步驟：
+
+1. 在 Telegram 找 **@BotFather**，用 `/newbot` 建立 bot，取得 token 填入 `.env`。
+   token 忘記時用 `/mybots` → 選 bot → API Token 查詢。
+2. 把 bot 加進要接收推播的群組，並在群組中傳一則 `/start@你的bot名稱`。
+   bot 預設為隱私模式，在群組裡只看得到指令或提及它的訊息，
+   因此直接聊天它是收不到的。
+3. 執行工具取得 chat id 並驗證：
+
+```bash
+.venv/bin/python scripts/telegram_setup.py          # 列出找到的聊天室
+.venv/bin/python scripts/telegram_setup.py --save   # 寫入 .env
+.venv/bin/python scripts/telegram_setup.py --test   # 發送測試訊息
+```
+
+群組的 chat id 為負數（超級群組多以 `-100` 開頭），不要漏掉負號。
+
 ## 使用方式
 
 ```bash
