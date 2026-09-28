@@ -114,15 +114,28 @@ def open_stocks(conn: sqlite3.Connection) -> set[str]:
 
 
 def settle_day(conn: sqlite3.Connection, day: pd.DataFrame, date: pd.Timestamp,
-               max_new: int | None = None) -> dict:
+               max_new: int | None = None, prev_day: pd.DataFrame | None = None) -> dict:
     """結算當日：先處理昨日推薦的成交，再檢查出場。
 
     必須在產生新推薦「之前」呼叫，否則當日剛買進的股票會因為狀態尚未更新
     而被重複推薦。
     max_new 限制單日新進場筆數，與回測的 MAX_NEW_PER_DAY 一致；
     超過上限時依推薦順位取前幾名，其餘視為未成交。
+
+    prev_day 提供前一交易日的資料，用來計算當日的停損價。停損必須以前一日
+    收盤為止的資訊決定，當日 ATR 要收盤後才知道，拿來判斷當日是否觸價
+    等同使用未來資訊。
     """
     idx = day.set_index("stock_id")
+    prev_idx = prev_day.set_index("stock_id") if prev_day is not None else None
+
+    def _stop_atr(sid: str, fallback: float) -> float:
+        """取前一交易日的 ATR；沒有前一日資料時退回進場時的 ATR。"""
+        if prev_idx is not None and sid in prev_idx.index:
+            v = prev_idx.loc[sid]["atr"]
+            if pd.notna(v):
+                return float(v)
+        return fallback
     bought, sold = [], []
 
     # ---------------------------------------------------------- 1. 結算昨日推薦
@@ -173,7 +186,7 @@ def settle_day(conn: sqlite3.Connection, day: pd.DataFrame, date: pd.Timestamp,
             continue
 
         row = idx.loc[sid]
-        stop = strategy.stop_level(avg, atr_entry, high, float(row["atr"]))
+        stop = strategy.stop_level(avg, atr_entry, high, _stop_atr(sid, atr_entry))
 
         exit_price = exit_reason = None
         if float(row["low"]) <= stop:
@@ -250,7 +263,11 @@ def record_candidates(conn: sqlite3.Connection, date: pd.Timestamp,
 
 
 def holdings_view(conn: sqlite3.Connection, day: pd.DataFrame) -> list[dict]:
-    """目前持有部位（依股票合併）的現況與出場價位。"""
+    """目前持有部位（依股票合併）的現況與出場價位。
+
+    這裡的停損價是「明日要掛的單」，因此用當日收盤後的 ATR 計算，與
+    settle_day 不同——後者判斷的是當日是否已觸價，只能用前一日的 ATR。
+    """
     idx = day.set_index("stock_id")
     today = pd.Timestamp(day["date"].iloc[0])
 

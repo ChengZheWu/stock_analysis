@@ -145,3 +145,26 @@ def test_backtest_defaults_match_config():
     assert sig.parameters["max_positions"].default == config.MAX_POSITIONS
     assert sig.parameters["top_n"].default == config.RANK_TOP_N
     assert sig.parameters["capital"].default == config.INITIAL_CAPITAL
+
+
+def test_exit_stop_uses_previous_day_atr(conn):
+    """出場判斷的停損價須以前一交易日的 ATR 計算。
+
+    當日 ATR 要到收盤才知道，若用它判斷當日是否觸價即為未來函數；
+    回測用 atr_m[t-1]，紀錄簿必須一致。
+    """
+    journal.record_candidates(conn, pd.Timestamp("2026-01-05"),
+                              [{"rank": 1, "stock_id": "2330", "trigger": 102.0, "atr": 3.0}])
+    d2 = pd.Timestamp("2026-01-06")
+    journal.settle_day(conn, _day("2026-01-06", [{"stock_id": "2330", **BASE}]), d2)
+    assert journal.open_positions(conn)
+
+    # 前一日 ATR 很小 -> 移動停損很高 -> 應觸發出場
+    prev_tight = _day("2026-01-07", [{"stock_id": "2330", **BASE, "atr": 0.5}])
+    today = _day("2026-01-08", [{"stock_id": "2330", "open": 101.0, "high": 104.0,
+                                 "low": 100.0, "close": 101.0, "atr": 50.0, "ma50": 90.0}])
+    res = journal.settle_day(conn, today, pd.Timestamp("2026-01-08"), prev_day=prev_tight)
+    assert res["sold"], "應以前一日的小 ATR 計算停損並出場"
+
+    # 若誤用當日的大 ATR（50），停損會遠低於最低價而不出場——確認並非如此
+    assert res["sold"][0]["reason"] == "移動停損"

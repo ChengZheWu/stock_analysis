@@ -114,7 +114,10 @@ def run_day(conn, panel: pd.DataFrame, taiex: pd.DataFrame,
 
     # 先結算成交與出場，持股狀態更新後才產生新推薦，
     # 否則當日剛買進的股票會被重複推薦
-    result = journal.settle_day(conn, day, date, max_new=MAX_NEW_PER_DAY)
+    dates = pd.DatetimeIndex(sorted(panel["date"].unique()))
+    pos = dates.get_loc(date)
+    prev = panel[panel["date"] == dates[pos - 1]] if pos > 0 else None
+    result = journal.settle_day(conn, day, date, max_new=MAX_NEW_PER_DAY, prev_day=prev)
 
     units: dict[str, int] = {}
     for p in journal.open_positions(conn):

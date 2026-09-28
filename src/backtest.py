@@ -109,13 +109,16 @@ def run(panel: pd.DataFrame, taiex: pd.DataFrame, start: str, end: str,
         max_new: int = MAX_NEW_PER_DAY, max_positions: int = MAX_POSITIONS,
         max_units: int = MAX_UNITS_PER_STOCK, alloc_per_unit: float | None = None,
         add_advance_atr: float = 0.0, fixed_amount: float | None = None,
-        record_candidates: bool = False) -> Result:
+        same_day_stop: bool = False, record_candidates: bool = False) -> Result:
     """
     max_units        單一檔股票最多買進幾個單位（1 代表不加碼）
     alloc_per_unit   每個單位佔淨值的比例，預設為 POSITION_PCT / max_units
     add_advance_atr  加碼條件：價格須較前一次進場上漲這麼多個 ATR（0 代表不限制）
     fixed_amount     每筆固定投入金額；設定後即忽略 alloc_per_unit。
                      注意：資金成長後固定金額會使投入比例逐年下降。
+    same_day_stop    進場當日是否也檢查停損。日 K 無法得知當日最低價出現在
+                     突破之前或之後，因此預設為 False（最低價視為出現在突破前，
+                     此時尚未持倉）。設為 True 可得到最悲觀的下界。
     """
     unit_pct = alloc_per_unit if alloc_per_unit is not None else POSITION_PCT / max_units
     dates, stocks, mats, elig = to_matrices(panel)
@@ -225,6 +228,24 @@ def run(panel: pd.DataFrame, taiex: pd.DataFrame, start: str, end: str,
                 positions.append(pos)
                 book[j] = pos
             filled += 1
+
+        # ---------------------------------------------------------- 進場當日停損（悲觀假設）
+        if same_day_stop and filled:
+            survivors = []
+            for pos in positions:
+                j = pos.j
+                if pos.entry_date != dates[t] or not has_data[t, j]:
+                    survivors.append(pos)
+                    continue
+                stop = round_to_tick(pos.entry_price - ATR_INIT_STOP * pos.entry_atr, up=False)
+                if float(l[t, j]) > stop:
+                    survivors.append(pos)
+                    continue
+                exit_px = min(float(o[t, j]), stop) * (1 - SLIPPAGE)
+                proceeds = exit_px * pos.shares - sell_cost(exit_px * pos.shares)
+                cash += proceeds
+                trades.append(_close(pos, dates[t], exit_px, proceeds, "當日停損"))
+            positions = survivors
 
         # ---------------------------------------------------------- 更新持股狀態
         for pos in positions:
