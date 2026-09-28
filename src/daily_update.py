@@ -16,6 +16,8 @@ from config import CACHE
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 TIMEOUT = 40
 INCREMENTAL_PATH = CACHE / "incremental.parquet"
+# 增量資料只是暫存，併入面板後即可捨棄；保留此天數以涵蓋排程中斷數日的情況
+KEEP_DAYS = 30
 
 TWSE_URL = ("https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
             "?date={d}&type=ALLBUT0999&response=json")
@@ -109,6 +111,10 @@ def update(days_back: int = 10) -> pd.DataFrame:
     merged = pd.concat([store] + new_frames, ignore_index=True) if len(store) else pd.concat(new_frames, ignore_index=True)
     merged["date"] = pd.to_datetime(merged["date"])
     merged = merged.drop_duplicates(subset=["stock_id", "date"], keep="last")
+    # 只保留近期：這些資料一經併入面板就不再需要，若持續累積，
+    # 一年會膨脹到數百萬筆（實測每個交易日約 2,000 檔）。
+    cutoff = merged["date"].max() - pd.Timedelta(days=KEEP_DAYS)
+    merged = merged[merged["date"] >= cutoff]
     merged = merged.sort_values(["stock_id", "date"]).reset_index(drop=True)
     merged.to_parquet(INCREMENTAL_PATH, index=False)
     return merged

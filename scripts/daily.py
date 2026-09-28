@@ -28,6 +28,8 @@ from src import adjust, corporate, daily_update, journal, notify
 # 實測近兩年最長連續休市為 12 個日曆日（2026 年農曆年 2/13～2/20 加上前後週末），
 # 因此設為 15 天以留出餘裕，避免長假期間誤報。
 STALE_WARN_DAYS = 15
+# 訊號文字檔每個交易日一個，保留約一年份
+KEEP_SIGNAL_FILES = 250
 
 
 def refresh_data() -> None:
@@ -121,6 +123,7 @@ def main() -> None:
     print("\n" + text)
     detail = RESULTS / f"signal_{todo[-1].date()}.txt"
     detail.write_text(text, encoding="utf-8")
+    _prune(RESULTS.glob("signal_*.txt"), KEEP_SIGNAL_FILES)
 
     if "--push" in args:
         from src import telegram_bot
@@ -128,6 +131,13 @@ def main() -> None:
         telegram_bot.send(compact or text)
         telegram_bot.send_document(detail, caption=f"{todo[-1].date()} 完整明細")
         print("\n已推播至 Telegram（精簡訊息 + 完整明細附檔）")
+
+
+def _prune(paths, keep: int) -> None:
+    """只保留最近 keep 個檔案，避免逐日累積。"""
+    files = sorted(paths, key=lambda f: f.name, reverse=True)
+    for f in files[keep:]:
+        f.unlink(missing_ok=True)
 
 
 def _notify_failure(exc: Exception) -> None:

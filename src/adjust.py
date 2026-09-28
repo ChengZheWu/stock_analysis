@@ -177,7 +177,11 @@ def build_panel(refresh: bool = False, verbose: bool = True) -> pd.DataFrame:
     events = corporate.build()
     raw = load_official(verbose=verbose)
     if raw.empty:
-        raise RuntimeError("找不到每日報表資料，請先執行 scripts/backfill_twse.py")
+        raise RuntimeError(
+            "找不到每日報表資料。\n"
+            "  本機：執行 bash deploy/backfill.sh 建立歷史資料\n"
+            "  伺服器：本機重建後以 bash deploy/sync.sh 同步 panel_recent.parquet\n"
+            "  （伺服器不保存逐日報表，無法自行重建完整面板）")
 
     # 剔除價格異常的列；官方資料的 OHLC 應自洽
     raw = raw[(raw[["open", "high", "low", "close"]] > 0).all(axis=1)]
