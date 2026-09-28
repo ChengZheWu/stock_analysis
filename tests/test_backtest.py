@@ -73,3 +73,29 @@ def test_scale_out_disabled_by_default():
     """預設為跌破均線整檔出清；分批減碼是選用行為。"""
     import inspect
     assert inspect.signature(backtest.run).parameters["scale_out"].default is False
+
+
+def test_cell_aligns_by_display_width():
+    """含中文的表頭需依顯示寬度補齊。
+
+    中日韓字元在等寬字型佔兩格，但 len() 只算一格；若以字元數補齊，
+    表頭與數字欄位會錯開（實測曾差 11 格）。
+    """
+    from src.notify import _cell, _width
+
+    assert _width("順位") == 4          # 兩個中文字 = 四格
+    assert _width("3037") == 4
+    assert _width("代號") == 4
+
+    header = _cell("代號", 6) + _cell("名稱", 11)
+    row = _cell("3037", 6) + _cell("欣興", 11)
+    assert _width(header) == _width(row)
+
+
+def test_truncate_respects_display_width():
+    """過長的股名須依顯示寬度截斷，避免撐破欄位。"""
+    from src.notify import _truncate, _width
+
+    assert _truncate("北極星藥業-KY", 10) == "北極星藥業"
+    assert _width(_truncate("北極星藥業-KY", 10)) <= 10
+    assert _truncate("欣興", 10) == "欣興"       # 未超寬者不變

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -60,6 +61,25 @@ def send(text: str, chat_id: str | None = None) -> bool:
         if not resp.ok:
             print(f"[telegram] 推播失敗: {resp.text[:200]}")
     return ok
+
+
+def send_document(path: Path, caption: str = "", chat_id: str | None = None) -> bool:
+    """以附件傳送檔案。
+
+    完整明細在手機上逐行顯示會過長，改為附檔讓使用者需要時才點開；
+    Telegram 會為純文字檔提供內建預覽，不必下載即可閱讀。
+    """
+    token, default_chat = _config()
+    with open(path, "rb") as fh:
+        resp = requests.post(
+            API.format(token=token, method="sendDocument"),
+            data={"chat_id": chat_id or default_chat, "caption": caption[:1024]},
+            files={"document": (path.name, fh, "text/plain")},
+            timeout=60,
+        )
+    if not resp.ok:
+        print(f"[telegram] 附件傳送失敗: {resp.text[:200]}")
+    return resp.ok
 
 
 def check() -> dict:

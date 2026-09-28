@@ -111,19 +111,23 @@ def main() -> None:
                 "若非連假，請檢查排程與資料來源")
         return
 
-    text = ""
+    text = compact = ""
     for d in todo:
-        text, _ = notify.run_day(conn, panel, taiex, d)
+        text, res = notify.run_day(conn, panel, taiex, d)
+        compact = res.get("compact", "")
         if len(todo) > 1:
             print(f"處理 {d.date()}", flush=True)
 
     print("\n" + text)
-    (RESULTS / f"signal_{todo[-1].date()}.txt").write_text(text, encoding="utf-8")
+    detail = RESULTS / f"signal_{todo[-1].date()}.txt"
+    detail.write_text(text, encoding="utf-8")
 
     if "--push" in args:
         from src import telegram_bot
-        telegram_bot.send(text)
-        print("\n已推播至 Telegram")
+        # 訊息只放精簡版，手機上一眼看完；完整明細以附檔提供，需要時再點開
+        telegram_bot.send(compact or text)
+        telegram_bot.send_document(detail, caption=f"{todo[-1].date()} 完整明細")
+        print("\n已推播至 Telegram（精簡訊息 + 完整明細附檔）")
 
 
 def _notify_failure(exc: Exception) -> None:
