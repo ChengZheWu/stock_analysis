@@ -34,6 +34,21 @@ class Position:
     j: int = -1                      # 股票在矩陣中的索引
     units: int = 1                   # 買進次數
     last_entry_price: float = 0.0    # 最近一次買進價，供加碼條件判斷
+    ma_armed: bool = True            # 是否可觸發跌破均線的減碼
+
+    def take(self, sell_units: int) -> tuple[int, float]:
+        """依單位數比例賣出，回傳 (股數, 對應成本)。
+
+        多次加碼合併為一個部位，因此按單位比例切分股數與成本。
+        """
+        sell_units = min(sell_units, self.units)
+        shares = int(round(self.shares * sell_units / self.units))
+        shares = max(1, min(shares, self.shares))
+        cost = self.cost * shares / self.shares
+        self.shares -= shares
+        self.cost -= cost
+        self.units -= sell_units
+        return shares, cost
 
     def add(self, price: float, shares: int, atr: float, fee: float, close: float) -> None:
         """加碼：股數累加，成本價改以加權平均計算。"""
@@ -109,13 +124,16 @@ def run(panel: pd.DataFrame, taiex: pd.DataFrame, start: str, end: str,
         max_new: int = MAX_NEW_PER_DAY, max_positions: int = MAX_POSITIONS,
         max_units: int = MAX_UNITS_PER_STOCK, alloc_per_unit: float | None = None,
         add_advance_atr: float = 0.0, fixed_amount: float | None = None,
-        same_day_stop: bool = False, record_candidates: bool = False) -> Result:
+        same_day_stop: bool = False, scale_out: bool = False,
+        record_candidates: bool = False) -> Result:
     """
     max_units        單一檔股票最多買進幾個單位（1 代表不加碼）
     alloc_per_unit   每個單位佔淨值的比例，預設為 POSITION_PCT / max_units
     add_advance_atr  加碼條件：價格須較前一次進場上漲這麼多個 ATR（0 代表不限制）
     fixed_amount     每筆固定投入金額；設定後即忽略 alloc_per_unit。
                      注意：資金成長後固定金額會使投入比例逐年下降。
+    scale_out        跌破 50 日均線時是否只減碼一半（剩餘部位續抱至觸及停損），
+                     而非整檔出清。僅對持有 2 單位以上的部位生效。
     same_day_stop    進場當日是否也檢查停損。日 K 無法得知當日最低價出現在
                      突破之前或之後，因此預設為 False（最低價視為出現在突破前，
                      此時尚未持倉）。設為 True 可得到最悲觀的下界。
@@ -163,20 +181,38 @@ def run(panel: pd.DataFrame, taiex: pd.DataFrame, start: str, end: str,
 
             atr_now = float(atr_m[t - 1, j]) if t > 0 and not np.isnan(atr_m[t - 1, j]) else pos.entry_atr
             stop = pos.stop(atr_now)
-            exit_px = None
-            if float(l[t, j]) <= stop:
-                exit_px, reason = min(float(o[t, j]), stop), "移動停損"
-            elif j in ma_exit_flags:
-                exit_px, reason = float(o[t, j]), "跌破50日均線"
 
-            if exit_px is None:
+            if float(l[t, j]) <= stop:
+                # 觸及移動停損：整檔出清
+                exit_px = min(float(o[t, j]), stop) * (1 - SLIPPAGE)
+                proceeds = exit_px * pos.shares - sell_cost(exit_px * pos.shares)
+                cash += proceeds
+                trades.append(_close(pos, dates[t], exit_px, proceeds, "移動停損"))
+                continue
+
+            if scale_out and j in ma_exit_flags and pos.ma_armed and pos.units > 1:
+                # 跌破均線視為警訊而非出場訊號：先減碼一半，剩餘部位續抱。
+                # 減碼後解除觸發，須待股價重回均線之上才會再次觸發，
+                # 否則連續數日低於均線會逐次減碼，等同全出還多付手續費。
+                exit_px = float(o[t, j]) * (1 - SLIPPAGE)
+                sell_units = (pos.units + 1) // 2
+                shares, cost = pos.take(sell_units)
+                proceeds = exit_px * shares - sell_cost(exit_px * shares)
+                cash += proceeds
+                trades.append(_close_part(pos, dates[t], exit_px, shares, cost,
+                                          proceeds, "跌破50日均線減碼", sell_units))
+                pos.ma_armed = False
                 survivors.append(pos)
                 continue
 
-            exit_px *= (1 - SLIPPAGE)
-            proceeds = exit_px * pos.shares - sell_cost(exit_px * pos.shares)
-            cash += proceeds
-            trades.append(_close(pos, dates[t], exit_px, proceeds, reason))
+            if j in ma_exit_flags and (not scale_out or pos.units <= 1 or not pos.ma_armed):
+                exit_px = float(o[t, j]) * (1 - SLIPPAGE)
+                proceeds = exit_px * pos.shares - sell_cost(exit_px * pos.shares)
+                cash += proceeds
+                trades.append(_close(pos, dates[t], exit_px, proceeds, "跌破50日均線"))
+                continue
+
+            survivors.append(pos)
 
         positions = survivors
         ma_exit_flags.clear()
@@ -252,8 +288,11 @@ def run(panel: pd.DataFrame, taiex: pd.DataFrame, start: str, end: str,
             j = pos.j
             if has_data[t, j]:
                 pos.highest_close = max(pos.highest_close, float(c[t, j]))
-                if not np.isnan(ma_m[t, j]) and float(c[t, j]) < float(ma_m[t, j]):
-                    ma_exit_flags.add(j)
+                if not np.isnan(ma_m[t, j]):
+                    if float(c[t, j]) < float(ma_m[t, j]):
+                        ma_exit_flags.add(j)
+                    else:
+                        pos.ma_armed = True      # 重回均線之上，減碼訊號重新生效
 
         mkt_value = sum(p.shares * float(c_valued[t, p.j]) for p in positions)
         equity[n] = cash + mkt_value
@@ -280,6 +319,18 @@ def run(panel: pd.DataFrame, taiex: pd.DataFrame, start: str, end: str,
     eq = pd.Series(equity, index=dates[day_idx], name="equity")
     tdf = pd.DataFrame([t.__dict__ for t in trades])
     return Result(equity=eq, trades=tdf, daily_candidates=candidates_log)
+
+
+def _close_part(pos: Position, date: pd.Timestamp, price: float, shares: int,
+                cost: float, proceeds: float, reason: str, units: int) -> Trade:
+    """部分出場的成交紀錄。成本依賣出股數比例分攤。"""
+    pnl = proceeds - cost
+    return Trade(
+        stock_id=pos.stock_id, entry_date=pos.entry_date,
+        exit_date=date, entry_price=pos.entry_price, exit_price=price,
+        shares=shares, pnl=pnl, pnl_pct=pnl / cost if cost else 0.0,
+        hold_days=(date - pos.entry_date).days, reason=reason, units=units,
+    )
 
 
 def _close(pos: Position, date: pd.Timestamp, price: float, proceeds: float, reason: str) -> Trade:
