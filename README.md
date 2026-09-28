@@ -138,17 +138,19 @@ TELEGRAM_CHAT_ID=你的chat id         # 推播才需要
 
 ## 部署到伺服器
 
-每日盤後需自動執行，因此要有一台常開的機器。實測資源需求：
+開發與回測在本機進行，伺服器只負責每天盤後產生訊號。兩者需要的資源差很多：
 
-| 項目 | 數值 |
-|---|---|
-| 每日任務耗時 | 約 90 秒 |
-| 峰值記憶體 | 1.7 GB |
-| 磁碟用量 | 約 1.5 GB |
-| 對外請求 | 每天約 12 次 |
+| | 本機 | 伺服器 |
+|---|---|---|
+| 工作 | 開發、回測、重建面板 | 每日訊號 |
+| 峰值記憶體 | 1.2 GB | **750 MB** |
+| 資料量 | 約 330 MB（含十年逐日報表） | **23 MB** |
+| 每次耗時 | 重建約 25 秒 | 約 19 秒 |
 
-首次建立歷史資料時，完整重建面板的峰值記憶體約 5 GB，因此建議機器有 4 GB 以上記憶體。
-日常排程採增量更新，只需 1.7 GB。
+伺服器不需要完整面板（約 150 MB）與十年逐日報表（約 155 MB），
+只要近期面板（450 個交易日）等約 23 MB。近期面板採滾動視窗，不會無限成長。
+
+因此 **2 GB 記憶體的小型主機即可**，即使同時跑其他程式也有餘裕。
 
 ### Oracle Cloud Always Free
 
@@ -169,38 +171,50 @@ ARM 架構不影響本專案，所需套件（pandas、numpy、pyarrow）均有 
 ### 部署步驟
 
 ```bash
-# 1. 本機打包程式碼（不含資料與虛擬環境）
-tar czf stock.tar.gz --exclude=.venv --exclude=data --exclude=.git .
-scp -i <你的私鑰> stock.tar.gz ubuntu@<伺服器IP>:~/
+# ── 本機：先建好資料 ──
+bash deploy/backfill.sh                    # 約 2 小時，只需做一次
 
-# 2. 伺服器端解開並建置環境
-ssh -i <你的私鑰> ubuntu@<伺服器IP>
+# ── 打包程式碼（不含資料與虛擬環境，約 400 KB）──
+tar czf stock.tar.gz --exclude=.venv --exclude=data --exclude=.git .
+scp -i <私鑰> stock.tar.gz ubuntu@<伺服器IP>:~/
+
+# ── 伺服器：建置環境 ──
+ssh -i <私鑰> ubuntu@<伺服器IP>
 mkdir -p stock_analysis && tar xzf stock.tar.gz -C stock_analysis
 cd stock_analysis
 bash deploy/setup.sh
+nano .env                                  # 填入 token
 
-# 3. 填入 token
-nano .env        # FINMIND_TOKEN、TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_ID
+# ── 本機：同步資料（約 23 MB）──
+bash deploy/sync.sh ubuntu@<伺服器IP> <私鑰>
 
-# 4. 建立歷史資料（約 2 小時，用 tmux 避免斷線中斷）
-tmux new -s backfill
-bash deploy/backfill.sh
-# 按 Ctrl+B 再按 D 離開，日後用 tmux attach -t backfill 回來
-
-# 5. 驗證
-.venv/bin/python -m pytest tests/ -q
+# ── 伺服器：驗證並設定排程 ──
 .venv/bin/python scripts/daily.py --no-update
-
-# 6. 設定每日排程
 bash deploy/install_cron.sh
 ```
 
-排程內容：
+伺服器**不需要**執行 `backfill.sh`——歷史資料在本機建好後同步過去即可。
 
-- 週一至週五 15:30　產生訊號並推播（台股 13:30 收盤，官方報表約 14:00–15:00 齊備）
-- 每週六 20:00　　　完整重建面板，校正增量更新可能累積的誤差
+日後策略或參數有調整時，在本機重跑回測確認，再重新 `sync.sh` 同步資料、
+`scp` 更新程式碼即可。
 
-排程失敗時會推播錯誤訊息到 Telegram，避免無人看管時靜默中斷。
+### 排程與每日資料維護
+
+`install_cron.sh` 會設定週一至週五 15:30 執行（台股 13:30 收盤，
+官方報表約 14:00–15:00 齊備，留有緩衝）。非交易日不會產生訊號，也不會推播。
+
+**伺服器每天會自行維護資料，不需要重複同步**：
+
+1. 向證交所與櫃買抓取最新行情（每天約 2 次請求）
+2. 追加到近期面板，並重算近期有除權息或減資的股票
+3. 更新近三個月的公司行為
+4. 產生訊號、寫入紀錄簿、推播
+
+`sync.sh` 只在兩種情況需要執行：初次部署，以及本機重建面板後
+（例如調整了還原邏輯或補抓了歷史資料）。
+
+排程失敗時會推播錯誤訊息；連續超過 15 天沒有新資料也會通知，
+避免資料來源或排程異常時無人察覺。
 
 ### 注意事項
 

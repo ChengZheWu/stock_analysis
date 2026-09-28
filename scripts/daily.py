@@ -38,7 +38,11 @@ def refresh_data() -> None:
     """
     print("更新每日行情…", flush=True)
     daily_update.update(days_back=10)
-    adjust.update_panel()
+    # 有完整面板（本機）就一併更新，否則只維護近期面板（伺服器）
+    if adjust.PANEL_PATH.exists():
+        adjust.update_panel()
+    else:
+        adjust.update_recent()
 
     print("更新公司行為…", flush=True)
     recent = (pd.Timestamp.today() - pd.DateOffset(months=3)).strftime("%Y-%m-%d")

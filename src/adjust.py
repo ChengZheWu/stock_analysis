@@ -20,6 +20,8 @@ RECENT_PATH = CACHE / "panel_recent.parquet"
 RECENT_DAYS = 450
 # 完整重建時每批處理的股票檔數，用於控制峰值記憶體
 BUILD_CHUNK = 200
+# 讀取每日報表時每批合併的檔案數，同樣用於控制峰值記憶體
+READ_BATCH = 300
 _PRICE_COLS = {"open": "open", "max": "high", "min": "low", "close": "close",
                "Trading_Volume": "volume", "Trading_money": "amount"}
 
@@ -33,17 +35,27 @@ def load_official(verbose: bool = True) -> pd.DataFrame:
     if not files:
         return pd.DataFrame()
 
-    frames = []
+    # 分批讀取並立即壓縮型別。一次讀完再處理會讓同一份資料在 concat、
+    # 去重、排序的過程中被複製多次，峰值記憶體可達最終大小的六倍以上。
+    batches: list[pd.DataFrame] = []
+    buf: list[pd.DataFrame] = []
     for i, path in enumerate(files, 1):
         df = pd.read_parquet(path)
         if len(df):
-            frames.append(df)
+            buf.append(df)
+        if len(buf) >= READ_BATCH or i == len(files):
+            if buf:
+                part = pd.concat(buf, ignore_index=True)
+                buf.clear()
+                batches.append(_compact(part))
+                del part
         if verbose and i % 500 == 0:
             print(f"  讀取每日報表 {i}/{len(files)}", flush=True)
-    if not frames:
+    if not batches:
         return pd.DataFrame()
 
-    out = pd.concat(frames, ignore_index=True)
+    out = pd.concat(batches, ignore_index=True)
+    batches.clear()
     out["date"] = pd.to_datetime(out["date"])
     # 增量更新的資料同樣併入，讓歷史與最新交易日銜接
     inc_path = CACHE / "incremental.parquet"
@@ -54,22 +66,23 @@ def load_official(verbose: bool = True) -> pd.DataFrame:
             out = pd.concat([out, inc], ignore_index=True)
 
     out = out.drop_duplicates(subset=["stock_id", "date"], keep="last")
-    out = out[_is_common_stock(out["stock_id"])]
-    out = out.sort_values(["stock_id", "date"]).reset_index(drop=True)
-    return _compact(out)
+    out = out[_is_common_stock(out["stock_id"]).to_numpy()]
+    out = out.sort_values(["stock_id", "date"], ignore_index=True)
+    return out
 
 
 def _compact(df: pd.DataFrame) -> pd.DataFrame:
-    """壓縮欄位型別。
+    """就地壓縮欄位型別，價格與成交量降為 float32。
 
-    500 萬筆資料中，stock_id 以 Python 字串儲存就佔數百 MB；
-    改為 category 並將價格降為 float32，可讓記憶體用量降到約四分之一。
+    不使用 df.copy()：呼叫端傳入的都是剛建立、無其他參照的中間結果，
+    就地修改可省下一次完整複製。
     """
-    out = df.copy()
     for col in ("open", "high", "low", "close", "volume"):
-        if col in out.columns:
-            out[col] = out[col].astype("float32")
-    return out
+        if col in df.columns:
+            df[col] = df[col].astype("float32")
+    # 不轉 category：pandas 3.0 的字串型別本身已足夠精簡，
+    # 而合併不同批次的 category 會退回字串並增加記憶體用量（實測 201→301 MB）。
+    return df
 
 
 def _is_common_stock(ids: pd.Series) -> pd.Series:
@@ -208,11 +221,99 @@ def build_panel(refresh: bool = False, verbose: bool = True) -> pd.DataFrame:
     return panel
 
 
+def load_new_days(after: pd.Timestamp) -> pd.DataFrame:
+    """只讀取指定日期之後的行情，不碰十年份的歷史檔案。
+
+    來源有二：增量更新寫入的 incremental.parquet，以及逐日報表中日期較新的檔案
+    （例如剛補抓過歷史）。每日排程只需要最近幾天，重讀全部檔案既慢又佔記憶體。
+    """
+    frames = []
+    inc_path = CACHE / "incremental.parquet"
+    if inc_path.exists():
+        inc = pd.read_parquet(inc_path)
+        if len(inc):
+            inc["date"] = pd.to_datetime(inc["date"])
+            frames.append(inc[inc["date"] > after])
+
+    for path in sorted((RAW / "daily").glob("*.parquet")):
+        try:
+            day = pd.Timestamp(path.stem)
+        except ValueError:
+            continue
+        if day <= after:
+            continue
+        df = pd.read_parquet(path)
+        if len(df):
+            frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    out["date"] = pd.to_datetime(out["date"])
+    out = out.drop_duplicates(subset=["stock_id", "date"], keep="last")
+    out = out[_is_common_stock(out["stock_id"]).to_numpy()]
+    return _compact(out.sort_values(["stock_id", "date"], ignore_index=True))
+
+
+def update_recent(lookback_days: int = 180, verbose: bool = True) -> pd.DataFrame:
+    """只維護近期面板，不碰完整面板。
+
+    每日訊號只需要最近 450 個交易日；完整面板（約 500 萬筆）僅回測使用。
+    伺服器上不放完整面板，可省下大量記憶體與磁碟。
+    """
+    if not RECENT_PATH.exists():
+        return update_panel(lookback_days=lookback_days, verbose=verbose)
+
+    panel = pd.read_parquet(RECENT_PATH)
+    panel["date"] = pd.to_datetime(panel["date"])
+    last = panel["date"].max()
+
+    fresh = load_new_days(last)
+    if fresh.empty:
+        if verbose:
+            print(f"近期面板已是最新（{last.date()}）")
+        return panel
+
+    events = corporate.build()
+    cutoff = last - pd.Timedelta(days=lookback_days)
+    recent_ids = set(events[events["date"] > cutoff]["stock_id"])
+
+    cols = ["stock_id", "date", "open", "high", "low", "close", "volume", "adj_factor"]
+    out = pd.concat([panel, fresh.assign(adj_factor=1.0)[cols]], ignore_index=True)
+
+    if recent_ids:
+        ev_by_stock = {sid: g for sid, g in events.groupby("stock_id")}
+        fixed = []
+        for sid in recent_ids:
+            grp = out[out["stock_id"] == sid]
+            if grp.empty:
+                continue
+            raw = grp.copy()
+            for col in ("open", "high", "low", "close"):
+                raw[col] = raw[col] / raw["adj_factor"]
+            raw["volume"] = raw["volume"] * raw["adj_factor"]
+            fixed.append(_apply_factors(raw.drop(columns="adj_factor"),
+                                        ev_by_stock.get(sid, pd.DataFrame())))
+        if fixed:
+            out = out[~out["stock_id"].isin(recent_ids)]
+            out = pd.concat([out] + fixed, ignore_index=True)
+
+    out = out[cols].drop_duplicates(subset=["stock_id", "date"], keep="last")
+    # 維持固定視窗，避免檔案無限成長
+    dates = pd.DatetimeIndex(sorted(out["date"].unique()))
+    out = out[out["date"] >= dates[max(0, len(dates) - RECENT_DAYS)]]
+    out = out.sort_values(["stock_id", "date"], ignore_index=True)
+    out.to_parquet(RECENT_PATH, index=False)
+    if verbose:
+        print(f"近期面板更新至 {out['date'].max().date()}，{len(out):,} 筆")
+    return out
+
+
 def update_panel(lookback_days: int = 180, verbose: bool = True) -> pd.DataFrame:
     """增量更新面板：只補上新交易日，必要時重算受影響股票的還原因子。
 
-    完整重建要載入十年全市場資料，峰值記憶體約 5 GB；每日更新用不到這個規模，
-    因此改為在既有面板上追加，讓日常排程能在小型主機上執行。
+    完整重建要載入十年全市場資料；每日更新用不到這個規模，因此改為在既有
+    面板上追加，且只讀取新增日期的檔案，讓日常排程能在小型主機上執行。
     """
     if not PANEL_PATH.exists():
         return build_panel(verbose=verbose)
@@ -221,8 +322,7 @@ def update_panel(lookback_days: int = 180, verbose: bool = True) -> pd.DataFrame
     panel["date"] = pd.to_datetime(panel["date"])
     last = panel["date"].max()
 
-    fresh = load_official(verbose=False)
-    fresh = fresh[fresh["date"] > last]
+    fresh = load_new_days(last)
     if fresh.empty:
         if verbose:
             print(f"面板已是最新（{last.date()}），無需更新")

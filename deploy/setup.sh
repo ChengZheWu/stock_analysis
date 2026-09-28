@@ -54,6 +54,21 @@ for w in config.check_sizing():
 
 mkdir -p data/raw/daily data/cache data/results
 
+# 完整重建面板的峰值約 1.2 GB，日常排程約 750 MB。
+# 2 GB 記憶體的主機若同時跑其他程式，重建時可能不足；
+# 建立 swap 可讓這個一次性步驟安全完成，日常排程不會用到。
+TOTAL_MB=$(free -m | awk '/^Mem:/{print $2}')
+SWAP_MB=$(free -m | awk '/^Swap:/{print $2}')
+if [ "$TOTAL_MB" -lt 3000 ] && [ "$SWAP_MB" -lt 1000 ]; then
+    echo "==> 記憶體 ${TOTAL_MB}MB 且無 swap，建立 2GB swap"
+    sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile >/dev/null
+    sudo swapon /swapfile
+    grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+    echo "    完成：$(free -h | awk '/^Swap:/{print $2}') swap"
+fi
+
 if [ ! -f .env ]; then
     cat > .env <<'ENVEOF'
 FINMIND_TOKEN=
