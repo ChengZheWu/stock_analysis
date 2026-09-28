@@ -1,0 +1,11 @@
+.venv/
+.git/
+.env
+data/
+tests/
+deploy/
+*.md
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+*.tar.gz

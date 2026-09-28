@@ -63,6 +63,10 @@ def refresh_data() -> None:
 
 def main() -> None:
     args = sys.argv[1:]
+    if {"-h", "--help"} & set(args):
+        print(__doc__)
+        return
+
     conn = journal.connect()
 
     if "--history" in args:

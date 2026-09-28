@@ -185,7 +185,59 @@ ARM 架構不影響本專案，所需套件（pandas、numpy、pyarrow）均有 
 
 若建立時出現 "Out of host capacity"，表示該區域 ARM 資源已滿，可換區域或稍後重試。
 
-### 部署步驟
+### 以 Docker 部署（建議）
+
+伺服器可能已有其他服務使用不同的 Python 版本，容器化能避免互相干擾，
+也不需在系統層安裝額外的 Python。
+
+容器設計為**跑完即退出**，由主機 cron 觸發，而非常駐服務——記憶體只在
+執行的數十秒內佔用，其餘時間為零。這在小型主機上與常駐程序差異很大。
+
+```bash
+# ── 本機：建好資料並打包程式碼 ──
+bash deploy/backfill.sh
+tar czf code.tar.gz --exclude=.venv --exclude=data --exclude=.git .
+scp code.tar.gz root@<IP>:/tmp/
+
+# ── 伺服器：安裝 Docker 並解開程式碼 ──
+ssh root@<IP>
+mkdir -p /root/stock_analysis/data/{cache,results}
+cd /root/stock_analysis && tar xzf /tmp/code.tar.gz
+
+# ── 本機：傳送 .env 與資料 ──
+scp .env root@<IP>:/root/stock_analysis/.env
+bash deploy/sync.sh root@<IP>
+
+# ── 伺服器：建置並驗證 ──
+cd /root/stock_analysis
+docker compose build
+docker compose run --rm daily --no-update
+```
+
+映像檔約 600 MB（使用 `requirements-server.txt`，省略回測與繪圖專用套件）。
+實測執行期間系統記憶體高點約 860 MB，結束後即釋放。
+
+排程請依主機時區換算。若主機為 UTC，台股盤後 15:30 對應 UTC 07:30：
+
+```
+30 7 * * 1-5 cd /root/stock_analysis && docker compose run --rm daily >> data/cron.log 2>&1
+0  8 * * 1-5 cd /root/stock_analysis && bash deploy/backup.sh >> data/cron.log 2>&1
+```
+
+容器內時區已設為 Asia/Taipei，**不需要也不應更動主機時區**——主機上其他
+服務的排程多半已依原時區換算過，更動會使其全部偏移。
+
+### 備份
+
+`data/results/journal.db` 記錄每一筆推薦與買賣，無法從其他資料重建。
+`deploy/backup.sh` 以 SQLite 的 `.backup` 取得一致快照並壓縮保存，保留最近 30 份：
+
+```bash
+bash deploy/backup.sh                 # 備份本機紀錄
+bash deploy/backup.sh root@<IP>       # 從伺服器取回並備份於本機
+```
+
+### 部署步驟（不使用 Docker）
 
 ```bash
 # ── 本機：先建好資料 ──

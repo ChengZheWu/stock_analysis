@@ -1,0 +1,24 @@
+# 每日訊號的執行定義。
+#
+# 不使用 restart 或常駐服務：容器由主機 cron 觸發，跑完即退出，
+# 平時不佔記憶體。小型主機上這比常駐程序省得多。
+#
+# 用法：
+#   docker compose build
+#   docker compose run --rm daily --no-update   # 不抓新資料，僅重出訊號
+#   docker compose run --rm daily               # 完整流程並推播
+
+services:
+  daily:
+    build: .
+    image: stock-analysis:latest
+    container_name: stock-daily
+    env_file: .env
+    volumes:
+      # 資料與紀錄簿留在主機，容器重建不會遺失
+      - ./data:/app/data
+    # 限制資源，避免影響主機上的其他服務
+    mem_limit: 1200m
+    cpus: 1.5
+    # 一次性任務，結束即移除
+    restart: "no"

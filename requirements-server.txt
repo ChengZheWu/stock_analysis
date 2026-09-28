@@ -1,0 +1,12 @@
+# 伺服器每日訊號所需的最小套件集合。
+#
+# 相較於 requirements.txt 省略：
+#   matplotlib  僅繪圖用，訊號流程未使用
+#   pytest      測試在本機執行
+#   yfinance    僅回測取得 0050 基準時使用
+#   python-telegram-bot  推播只用 HTTP API（requests），互動模式才需要此套件
+pandas==3.0.6
+numpy==2.5.3
+pyarrow==25.0.1
+requests==2.34.2
+python-dotenv==1.2.3
