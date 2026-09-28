@@ -14,8 +14,8 @@ import pandas as pd
 
 from config import (ATR_INIT_STOP, ATR_TRAIL_STOP, FEE_DISCOUNT, FEE_MIN,
                     FEE_RATE, INITIAL_CAPITAL, MAX_NEW_PER_DAY, MAX_POSITIONS,
-                    MIN_POSITION_VALUE, POSITION_PCT, RANK_TOP_N, SLIPPAGE,
-                    TAX_RATE)
+                    MAX_UNITS_PER_STOCK, MIN_POSITION_VALUE, POSITION_PCT,
+                    RANK_TOP_N, SLIPPAGE, TAX_RATE)
 from src.strategy import market_regime, round_to_tick
 
 _FIELDS = ("open", "high", "low", "close", "atr", "ma50", "trigger", "mom_adj")
@@ -107,7 +107,7 @@ def to_matrices(panel: pd.DataFrame) -> tuple[pd.DatetimeIndex, np.ndarray, dict
 def run(panel: pd.DataFrame, taiex: pd.DataFrame, start: str, end: str,
         capital: float = INITIAL_CAPITAL, top_n: int = RANK_TOP_N,
         max_new: int = MAX_NEW_PER_DAY, max_positions: int = MAX_POSITIONS,
-        max_units: int = 1, alloc_per_unit: float | None = None,
+        max_units: int = MAX_UNITS_PER_STOCK, alloc_per_unit: float | None = None,
         add_advance_atr: float = 0.0, fixed_amount: float | None = None,
         record_candidates: bool = False) -> Result:
     """

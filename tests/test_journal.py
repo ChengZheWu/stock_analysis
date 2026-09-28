@@ -130,3 +130,18 @@ def test_non_trading_day_produces_no_signal(tmp_path, monkeypatch):
 
     written = list(tmp_path.glob("signal_*.txt"))
     assert not written, "非交易日不應產生訊號檔"
+
+
+def test_backtest_defaults_match_config():
+    """回測的預設參數必須與設定一致，否則回測結果無法代表實際推播的訊號。"""
+    import inspect
+
+    import config
+    from src import backtest
+
+    sig = inspect.signature(backtest.run)
+    assert sig.parameters["max_units"].default == config.MAX_UNITS_PER_STOCK
+    assert sig.parameters["max_new"].default == config.MAX_NEW_PER_DAY
+    assert sig.parameters["max_positions"].default == config.MAX_POSITIONS
+    assert sig.parameters["top_n"].default == config.RANK_TOP_N
+    assert sig.parameters["capital"].default == config.INITIAL_CAPITAL

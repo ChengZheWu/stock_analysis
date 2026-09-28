@@ -97,9 +97,14 @@ def check_sizing(capital: float = INITIAL_CAPITAL) -> list[str]:
             f"將無法成交任何一筆。請把 POSITION_PCT 提高到 {need:.0%} 以上"
             f"（同時持股數將降為約 {int(1/need)} 檔），或調降 MIN_POSITION_VALUE。"
         )
-    if POSITION_PCT * MAX_POSITIONS > 1.0:
+    if MAX_POSITIONS is not None and POSITION_PCT * MAX_POSITIONS > 1.0:
         warnings.append(
             f"POSITION_PCT × MAX_POSITIONS = {POSITION_PCT*MAX_POSITIONS:.0%} 超過 100%，"
             "實際持股數會受現金限制而達不到上限。"
+        )
+    if MAX_POSITIONS is None:
+        warnings.append(
+            f"未設持股上限，實際檔數由資金決定，約 {int(1/POSITION_PCT)} 檔"
+            f"（每筆佔淨值 {POSITION_PCT:.1%}）。"
         )
     return warnings
